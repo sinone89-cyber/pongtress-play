@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#0d0b1e">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>PONGTRESS</title>
+  <link rel="manifest" href="manifest.json">
+  <link rel="stylesheet" href="css/game.css">
+</head>
+<body>
+  <div id="app">
+    <!-- 타이틀 -->
+    <section id="title" class="screen">
+      <h1 class="logo">PONGTRESS</h1>
+      <p class="tagline">튕겨서 부수는 로그라이크 핀볼</p>
+      <button id="btn-start" class="btn primary">시작</button>
+      <p class="version">prototype 0.1 · 모바일 세로</p>
+    </section>
+
+    <!-- 플레이 -->
+    <section id="play" class="screen" hidden>
+      <header id="hud">
+        <div class="hud-cell">
+          <span class="hud-label">층</span>
+          <span id="hud-floor" class="hud-value">1</span>
+        </div>
+        <div class="hud-cell wide">
+          <span class="hud-label">적 <span id="hud-enemy-name">허수아비</span></span>
+          <div class="bar enemy"><div id="hud-enemy-hp" class="bar-fill"></div></div>
+        </div>
+        <div class="hud-cell">
+          <span class="hud-label">발사</span>
+          <span id="hud-shots" class="hud-value">0</span>
+        </div>
+      </header>
+
+      <div id="stage-wrap">
+        <canvas id="stage"></canvas>
+        <div id="toast"></div>
+      </div>
+
+      <footer id="dock">
+        <div class="hud-cell">
+          <span class="hud-label">HP</span>
+          <div class="bar player"><div id="hud-player-hp" class="bar-fill"></div></div>
+        </div>
+        <div class="hud-cell">
+          <span class="hud-label">이번 피해</span>
+          <span id="hud-damage" class="hud-value">0</span>
+        </div>
+      </footer>
+    </section>
+
+    <!-- 결과 -->
+    <section id="result" class="screen" hidden>
+      <h2 id="result-title">층 돌파</h2>
+      <p id="result-body"></p>
+      <button id="btn-next" class="btn primary">계속</button>
+    </section>
+
+    <p id="boot-error" hidden></p>
+  </div>
+
+  <script src="js/game.js"></script>
+</body>
+</html>
