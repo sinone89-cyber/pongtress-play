@@ -142,7 +142,7 @@
     // 플런저: 우측 하단에서 위로(살짝 왼쪽) 발사
     S.balls.push({
       x: r.x + r.w - CFG.ballRadius - 2, y: r.y + r.h - CFG.ballRadius - 2,
-      vx: -power * 0.28, vy: -power, r: CFG.ballRadius
+      vx: -power * CFG.launchVx, vy: -power, r: CFG.ballRadius, age: 0
     });
     S.launchesLeft--;
   }
@@ -235,6 +235,7 @@
     }
     // 스킬로 추가된 샷은 applyActive에서 unshift됨
     S.battleTimer = 0;
+    S.battleStage = 'intro';
     renderSkills();
   }
 
@@ -252,12 +253,23 @@
 
   function stepBattle(dt) {
     S.battleTimer += dt * 1000;
+    // 도입: 필드가 커진 걸 잠깐 보여준 뒤 공격 시작
+    if (S.battleStage === 'intro') {
+      if (S.battleTimer < CFG.battleStartDelay) return;
+      S.battleTimer = 0; S.battleStage = 'shooting'; return;
+    }
+    // 마무리: 마지막 공격 후 잠깐 멈췄다 적 전진
+    if (S.battleStage === 'outro') {
+      if (S.battleTimer < CFG.battleEndDelay) return;
+      S.battleStage = 'done'; endBattle(); return;
+    }
+    // 공격 진행
     if (S.battleTimer < CFG.battleShotDelay) return;
     S.battleTimer = 0;
-    if (S.shotQueue.length === 0) { endBattle(); return; }
+    if (S.shotQueue.length === 0) { S.battleStage = 'outro'; S.battleTimer = 0; return; }
     const shot = S.shotQueue.shift();
     const e = frontmostEnemy();
-    if (!e) { S.shotQueue = []; endBattle(); return; }
+    if (!e) { S.shotQueue = []; S.battleStage = 'outro'; S.battleTimer = 0; return; }
     let dmg = shot.dmg;
     if (e.isBoss && e.stun > 0) dmg = Math.round(dmg * (1 + BOSS_GOLEM.vulnerable));
     e.hp -= dmg;
@@ -454,6 +466,11 @@
       ctx.globalAlpha = fl.t * 0.5; ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
       ctx.beginPath(); ctx.arc(fl.x, fl.y, (fl.big ? 16 : 10) * (1.4 - fl.t), 0, 7); ctx.stroke(); ctx.globalAlpha = 1;
     }
+    // 전투 시작 배너
+    if (S.phase === 'battle' && S.battleStage === 'intro') {
+      ctx.fillStyle = '#ffcf5c'; ctx.textAlign = 'center'; ctx.font = 'bold 34px system-ui';
+      ctx.fillText('전투!', W / 2, r.field.y + r.field.h * 0.5);
+    }
   }
 
   // ============ 루프 ============
@@ -515,7 +532,11 @@
   window.addEventListener('resize', () => { if (!$('combat').hidden) resize(); });
 
   // 디버그/스모크 훅
-  window.__PONGTRESS__ = { get S() { return S; }, startRun, launchBall, enterBattle, CFG };
+  window.__PONGTRESS__ = {
+    get S() { return S; }, startRun, launchBall, enterBattle, CFG,
+    tick(dt) { if (!S || S.over) return; if (S.phase === 'load') stepBalls(dt); else if (S.phase === 'battle') { stepBattle(dt); checkBossThreshold(); } },
+    render() { if (S) draw(); }
+  };
 
   // 헤드리스 자가 테스트: ?sim=1 로 런을 자동 진행하며 런타임 오류·상태를 #boot-error 에 남긴다.
   function runSelfTest() {

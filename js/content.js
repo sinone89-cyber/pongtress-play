@@ -7,15 +7,18 @@ const CFG = {
   fieldRows: 5,            // 적 대기 필드 세로 칸 수(레인당)
   launchesPerTurn: 2,      // 한 장전 턴에 쏘는 볼 수(기본). 패시브로 증가 예정
   maxBalls: 60,            // 볼 폭주 방지 상한
-  gravity: 1500,           // px/s^2 (핀볼 영역 기준)
+  gravity: 1200,           // px/s^2 (핀볼 영역 기준)
   restitution: 0.68,
   wallRestitution: 0.72,
   ballRadius: 7,
   pegRadius: 9,
-  powerMin: 620,           // 플런저 최소 강도
-  powerMax: 1250,          // 최대(홀드 만충)
+  powerMin: 980,           // 플런저 최소 강도(위로 충분히 뜨게)
+  powerMax: 1650,          // 최대(홀드 만충)
   powerChargeTime: 900,    // ms, 홀드 만충까지
-  battleShotDelay: 110,    // ms, 전투 phase 공격 1발 간 간격
+  launchVx: 0.22,          // 발사 수평 성분 비율(위로 쏘되 살짝 왼쪽)
+  battleShotDelay: 240,    // ms, 전투 phase 공격 1발 간 간격(보이게 느리게)
+  battleStartDelay: 500,   // ms, 전투 phase 시작 후 첫 공격까지
+  battleEndDelay: 800,     // ms, 마지막 공격 후 적 전진까지
   enemyContactFlash: 250
 };
 
