@@ -175,7 +175,7 @@
     for (let i = S.balls.length - 1; i >= 0; i--) {
       const b = S.balls[i];
       b.age = (b.age || 0) + dt;
-      if (b.age > CFG.ballLifetime) { S.balls.splice(i, 1); continue; }   // 오래 떠돌면 소멸(충전 없음)
+      if (b.age > CFG.ballLifetime) { landBall(b); S.balls.splice(i, 1); continue; }   // 오래 떠돌면 소멸 대신 상단에서 강제 충전
       const speed = Math.hypot(b.vx, b.vy);
       const sub = Math.min(8, 1 + Math.floor(speed * dt / pegR));
       const h = dt / sub;
@@ -202,8 +202,9 @@
             else if (p.type === 'mult5') { splitBall(b, 4); p.alive = false; }
           }
         }
+        // 바닥은 반사 벽(무중력이라 볼은 사라지지 않고 위로 되돌아감)
+        if (b.y > botY - b.r) { b.y = botY - b.r; b.vy = -Math.abs(b.vy) * CFG.wallRestitution; }
         if (b.y <= topY) { landBall(b); S.balls.splice(i, 1); gone = true; }          // 상단 포켓 도달 → 충전
-        else if (b.y - b.r > botY) { S.balls.splice(i, 1); gone = true; }             // 바닥으로 빠짐 → 소멸
       }
     }
     if (S.phase === 'load' && S.launchesLeft <= 0 && S.balls.length === 0) enterBattle();
