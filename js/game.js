@@ -15,7 +15,7 @@
   // ── 전역 상태 ──
   let S = null;          // 런/전투 상태
   let anim = { floats: [], flashes: [] };
-  let charging = false, chargeStart = 0;
+  let aimActive = false, aimX = 0, aimY = 0;
   let lastTs = 0;
 
   // ============ 화면 전환 ============
@@ -24,17 +24,20 @@
   }
 
   // ============ 레이아웃(phase별 영역 비율) ============
+  // 위→아래: 적 필드 / 성벽(캐릭터) / 골 포켓(성벽 바로 아래) / 핀볼 필드(하단 중앙에서 위로 발사)
   function layout() {
     const load = !S || S.phase === 'load';
-    const f = load ? { field: .16, wall: .11, pins: .49, goal: .24 }
-                   : { field: .50, wall: .13, pins: .23, goal: .14 };
+    const f = load ? { field: .16, wall: .10, goal: .09, pins: .65 }
+                   : { field: .50, wall: .12, goal: .08, pins: .30 };
     let y = 0; const r = {};
     r.field = { x: 0, y, w: W, h: H * f.field }; y += r.field.h;
     r.wall = { x: 0, y, w: W, h: H * f.wall }; y += r.wall.h;
-    r.pins = { x: 0, y, w: W, h: H * f.pins }; y += r.pins.h;
-    r.goal = { x: 0, y, w: W, h: H * f.goal };
+    r.goal = { x: 0, y, w: W, h: H * f.goal }; y += r.goal.h;
+    r.pins = { x: 0, y, w: W, h: H * f.pins };
     return r;
   }
+  // 발사대 위치(핀볼 영역 하단 중앙)
+  function launcher() { const p = layout().pins; return { x: p.x + p.w / 2, y: p.y + p.h - CFG.ballRadius - 4 }; }
 
   function resize() {
     const rect = $('stage-wrap').getBoundingClientRect();
@@ -131,48 +134,59 @@
     S.launchesLeft = CFG.launchesPerTurn + S.bonusBalls + S.passiveBalls;
     S.balls = [];
     $('c-phase').textContent = '장전';
-    $('btn-fire').hidden = false; $('btn-auto').hidden = false;
     renderSkills();
   }
 
-  function launchBall() {
+  // 조준 방향(항상 위로 향하게 클램프)
+  function aimDir(tx, ty) {
+    const L = launcher();
+    let dx = tx - L.x, dy = ty - L.y;
+    const len = Math.hypot(dx, dy) || 1; dx /= len; dy /= len;
+    if (dy > -CFG.aimMinUp) { dy = -CFG.aimMinUp; dx = Math.sign(dx || 1) * Math.sqrt(Math.max(0, 1 - dy * dy)); }
+    return { dx, dy };
+  }
+  function launchBall(dir) {
     if (S.phase !== 'load' || S.launchesLeft <= 0 || S.over) return;
-    const r = layout().pins;
-    const power = currentPower();
-    // 플런저: 우측 하단에서 위로(살짝 왼쪽) 발사
-    S.balls.push({
-      x: r.x + r.w - CFG.ballRadius - 2, y: r.y + r.h - CFG.ballRadius - 2,
-      vx: -power * CFG.launchVx, vy: -power, r: CFG.ballRadius, age: 0
-    });
+    const L = launcher();
+    if (!dir) { const a = -Math.PI / 2 + (Math.random() - 0.5) * 1.5; dir = { dx: Math.cos(a), dy: Math.sin(a) }; }  // sim용 랜덤 상향
+    S.balls.push({ x: L.x, y: L.y, vx: dir.dx * CFG.launchSpeed, vy: dir.dy * CFG.launchSpeed, r: CFG.ballRadius, age: 0 });
     S.launchesLeft--;
   }
 
-  function currentPower() {
-    if (!charging) return CFG.powerMin;
-    const t = Math.min(1, (performance.now() - chargeStart) / CFG.powerChargeTime);
-    return CFG.powerMin + (CFG.powerMax - CFG.powerMin) * t;
+  // 조준 예측선: 첫 페그(또는 상단·바닥) 접촉까지 결정적으로 시뮬
+  function simulateAim(dir) {
+    const r = layout().pins, topY = r.y, botY = r.y + r.h, pegR = CFG.pegRadius, br = CFG.ballRadius;
+    let x = launcher().x, y = launcher().y, vx = dir.dx * CFG.launchSpeed, vy = dir.dy * CFG.launchSpeed;
+    const pts = [{ x, y }]; const dt = 1 / 120;
+    for (let i = 0; i < 500; i++) {
+      vy += CFG.gravity * dt; x += vx * dt; y += vy * dt;
+      if (x < r.x + br) { x = r.x + br; vx = Math.abs(vx) * CFG.wallRestitution; pts.push({ x, y }); }
+      if (x > r.x + r.w - br) { x = r.x + r.w - br; vx = -Math.abs(vx) * CFG.wallRestitution; pts.push({ x, y }); }
+      for (const p of S.pegs) { if (!p.alive) continue; const px = r.x + p.fx * r.w, py = r.y + p.fy * r.h; if (Math.hypot(x - px, y - py) < br + pegR) { pts.push({ x, y }); return pts; } }
+      if (y <= topY || y - br > botY) { pts.push({ x, y }); return pts; }
+      if (i % 2 === 0) pts.push({ x, y });
+    }
+    pts.push({ x, y }); return pts;
   }
 
   function stepBalls(dt) {
-    const r = layout().pins; const goalY = r.y + r.h;
+    const r = layout().pins; const topY = r.y, botY = r.y + r.h;
     const pegR = CFG.pegRadius;
     for (let i = S.balls.length - 1; i >= 0; i--) {
       const b = S.balls[i];
       b.age = (b.age || 0) + dt;
-      if (b.age > 3.5) { landBall(b); S.balls.splice(i, 1); continue; }   // 끼임 방지: 오래 살면 강제 낙하
+      if (b.age > CFG.ballLifetime) { S.balls.splice(i, 1); continue; }   // 오래 떠돌면 소멸(충전 없음)
       const speed = Math.hypot(b.vx, b.vy);
-      const sub = Math.min(6, 1 + Math.floor(speed * dt / pegR));
+      const sub = Math.min(8, 1 + Math.floor(speed * dt / pegR));
       const h = dt / sub;
-      let landed = false;
-      for (let s = 0; s < sub && !landed; s++) {
+      let gone = false;
+      for (let s = 0; s < sub && !gone; s++) {
         b.vy += CFG.gravity * h;
         b.x += b.vx * h; b.y += b.vy * h;
-        // 좌우 벽
+        // 좌우 벽 반사
         if (b.x < r.x + b.r) { b.x = r.x + b.r; b.vx = Math.abs(b.vx) * CFG.wallRestitution; }
         if (b.x > r.x + r.w - b.r) { b.x = r.x + r.w - b.r; b.vx = -Math.abs(b.vx) * CFG.wallRestitution; }
-        // 위 벽(핀 영역 상단)
-        if (b.y < r.y + b.r) { b.y = r.y + b.r; b.vy = Math.abs(b.vy) * CFG.wallRestitution; }
-        // 페그 충돌
+        // 페그 충돌(결정적: 랜덤 없음)
         for (const p of S.pegs) {
           if (!p.alive) continue;
           const px = r.x + p.fx * r.w, py = r.y + p.fy * r.h;
@@ -183,25 +197,23 @@
             const vdot = b.vx * nx + b.vy * ny;
             b.vx -= (1 + CFG.restitution) * vdot * nx;
             b.vy -= (1 + CFG.restitution) * vdot * ny;
-            b.vx += (Math.random() - 0.5) * 70;   // 수평 지터: 페그 위 수직 안착 방지
             anim.flashes.push({ x: px, y: py, t: 1 });
             if (p.type === 'mult2') { splitBall(b, 1); p.alive = false; }
             else if (p.type === 'mult5') { splitBall(b, 4); p.alive = false; }
           }
         }
-        // 골 포켓 진입
-        if (b.y >= goalY) { landBall(b); S.balls.splice(i, 1); landed = true; }
+        if (b.y <= topY) { landBall(b); S.balls.splice(i, 1); gone = true; }          // 상단 포켓 도달 → 충전
+        else if (b.y - b.r > botY) { S.balls.splice(i, 1); gone = true; }             // 바닥으로 빠짐 → 소멸
       }
     }
-    // 다 소모되면 전투로
     if (S.phase === 'load' && S.launchesLeft <= 0 && S.balls.length === 0) enterBattle();
   }
 
   function splitBall(b, n) {
+    const sp = Math.max(520, Math.hypot(b.vx, b.vy));
     for (let k = 0; k < n && S.balls.length < CFG.maxBalls; k++) {
-      const ang = (Math.random() - 0.5) * 1.2;
-      const sp = Math.hypot(b.vx, b.vy) * (0.8 + Math.random() * 0.3);
-      S.balls.push({ x: b.x, y: b.y, vx: Math.sin(ang) * sp * 0.6 - 40, vy: -Math.abs(Math.cos(ang) * sp) * 0.6, r: b.r });
+      const ang = -Math.PI / 2 + (Math.random() - 0.5) * 1.7;   // 상향 부채꼴로 분열
+      S.balls.push({ x: b.x, y: b.y, vx: Math.cos(ang) * sp, vy: Math.sin(ang) * sp, r: b.r, age: 0 });
     }
   }
 
@@ -221,7 +233,6 @@
   function enterBattle() {
     S.phase = 'battle';
     $('c-phase').textContent = '전투';
-    $('btn-fire').hidden = true;
     // 액티브 스킬 발동(자동 또는 armed) 결정 → 샷 큐 구성
     S.shotQueue = [];
     for (const c of S.chars) {
@@ -437,11 +448,19 @@
     }
     // 볼
     for (const b of S.balls) { ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, 7); ctx.fillStyle = '#eafcff'; ctx.fill(); }
-    // 플런저 파워 표시(장전 phase, 홀드 중)
-    if (S.phase === 'load' && charging) {
-      const t = (currentPower() - CFG.powerMin) / (CFG.powerMax - CFG.powerMin);
-      ctx.fillStyle = '#0008'; ctx.fillRect(r.pins.x + r.pins.w - 12, r.pins.y + 6, 6, r.pins.h - 12);
-      ctx.fillStyle = '#ffcf5c'; const hh = (r.pins.h - 12) * t; ctx.fillRect(r.pins.x + r.pins.w - 12, r.pins.y + 6 + (r.pins.h - 12 - hh), 6, hh);
+    // 발사대(하단 중앙) + 조준 가이드
+    if (S.phase === 'load') {
+      const L = launcher();
+      ctx.fillStyle = S.launchesLeft > 0 ? '#ffcf5c' : '#555';
+      ctx.beginPath(); ctx.arc(L.x, L.y, 11, 0, 7); ctx.fill();
+      if (aimActive && S.launchesLeft > 0) {
+        const pts = simulateAim(aimDir(aimX, aimY));
+        ctx.save(); ctx.strokeStyle = '#ffffffaa'; ctx.lineWidth = 2; ctx.setLineDash([5, 7]);
+        ctx.beginPath(); ctx.moveTo(pts[0].x, pts[0].y); for (const pt of pts) ctx.lineTo(pt.x, pt.y); ctx.stroke();
+        const end = pts[pts.length - 1];
+        ctx.setLineDash([]); ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(end.x, end.y, 4, 0, 7); ctx.fill();
+        ctx.restore();
+      }
     }
 
     // 골 포켓
@@ -504,8 +523,10 @@
   }
 
   // ============ 입력 ============
-  function fireDown(e) { e.preventDefault(); if (!S || S.phase !== 'load' || S.launchesLeft <= 0) return; charging = true; chargeStart = performance.now(); $('btn-fire').classList.add('charging'); }
-  function fireUp(e) { e.preventDefault(); if (!charging) return; charging = false; $('btn-fire').classList.remove('charging'); launchBall(); }
+  function canvasPoint(e) { const rect = canvas.getBoundingClientRect(); return { x: e.clientX - rect.left, y: e.clientY - rect.top }; }
+  function aimDown(e) { if (!S || S.phase !== 'load' || S.launchesLeft <= 0) return; e.preventDefault(); aimActive = true; const p = canvasPoint(e); aimX = p.x; aimY = p.y; }
+  function aimMove(e) { if (!aimActive) return; e.preventDefault(); const p = canvasPoint(e); aimX = p.x; aimY = p.y; }
+  function aimUp(e) { if (!aimActive) return; e.preventDefault(); aimActive = false; launchBall(aimDir(aimX, aimY)); }
 
   // ============ 로비 ============
   function renderLobby() {
@@ -527,8 +548,10 @@
   $('btn-sortie').onclick = () => startRun();
   $('btn-result').onclick = () => { $('result').hidden = true; show('lobby'); renderLobby(); };
   $('btn-auto').onclick = () => { S.autoSkill = !S.autoSkill; $('btn-auto').textContent = '자동 ' + (S.autoSkill ? 'ON' : 'OFF'); $('btn-auto').classList.toggle('on', S.autoSkill); };
-  const fb = $('btn-fire');
-  fb.addEventListener('pointerdown', fireDown); fb.addEventListener('pointerup', fireUp); fb.addEventListener('pointercancel', fireUp);
+  canvas.addEventListener('pointerdown', aimDown);
+  canvas.addEventListener('pointermove', aimMove);
+  canvas.addEventListener('pointerup', aimUp);
+  canvas.addEventListener('pointercancel', () => { aimActive = false; });
   window.addEventListener('resize', () => { if (!$('combat').hidden) resize(); });
 
   // 디버그/스모크 훅

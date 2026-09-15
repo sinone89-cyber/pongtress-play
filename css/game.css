@@ -61,11 +61,10 @@ body {
   border-radius: 10px; padding: 6px 10px; font: inherit; font-size: 12px; font-weight: 700; cursor: pointer; }
 .skillbtn.ready { color: var(--ink); border-color: var(--amber); box-shadow: 0 0 10px #ffcf5c44; }
 .skillbtn.armed { background: var(--amber); color: #3a2a05; }
-#control-row { display: flex; gap: 10px; }
-.ctl { appearance: none; border: 0; font: inherit; font-weight: 800; border-radius: 14px; padding: 16px; cursor: pointer;
+#control-row { display: flex; gap: 10px; align-items: center; }
+.aim-hint { flex: 1; font-size: 12px; color: var(--muted); }
+.ctl { appearance: none; border: 0; font: inherit; font-weight: 800; border-radius: 14px; padding: 12px 16px; cursor: pointer;
   background: #ffffff14; color: var(--ink); }
-.ctl.fire { flex: 1; font-size: 18px; background: linear-gradient(180deg, var(--amber), #e8a93a); color: #3a2a05; }
-.ctl.fire.charging { background: linear-gradient(180deg, #fff2c0, var(--amber)); }
 #btn-auto.on { background: var(--cyan); color: #062a26; }
 
 /* 모달 */

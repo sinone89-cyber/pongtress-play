@@ -7,15 +7,14 @@ const CFG = {
   fieldRows: 5,            // 적 대기 필드 세로 칸 수(레인당)
   launchesPerTurn: 2,      // 한 장전 턴에 쏘는 볼 수(기본). 패시브로 증가 예정
   maxBalls: 60,            // 볼 폭주 방지 상한
-  gravity: 1200,           // px/s^2 (핀볼 영역 기준)
-  restitution: 0.68,
-  wallRestitution: 0.72,
+  gravity: 380,            // px/s^2 (저중력: 볼이 위로 올라가 상단 포켓에 닿게, 살짝 아크)
+  restitution: 0.9,        // 퍼즐보블식: 벽·페그에서 에너지 거의 유지
+  wallRestitution: 1.0,
   ballRadius: 7,
   pegRadius: 9,
-  powerMin: 980,           // 플런저 최소 강도(위로 충분히 뜨게)
-  powerMax: 1650,          // 최대(홀드 만충)
-  powerChargeTime: 900,    // ms, 홀드 만충까지
-  launchVx: 0.22,          // 발사 수평 성분 비율(위로 쏘되 살짝 왼쪽)
+  launchSpeed: 900,        // 발사 속도(고정). 조준은 각도만
+  aimMinUp: 0.26,          // 조준 하한(수평 근처)을 막아 항상 위로 향하게 (vy < -aimMinUp*speed)
+  ballLifetime: 5,         // s, 상단에 못 닿고 떠도는 볼 제거
   battleShotDelay: 240,    // ms, 전투 phase 공격 1발 간 간격(보이게 느리게)
   battleStartDelay: 500,   // ms, 전투 phase 시작 후 첫 공격까지
   battleEndDelay: 800,     // ms, 마지막 공격 후 적 전진까지
