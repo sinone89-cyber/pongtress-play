@@ -1,299 +1,542 @@
 'use strict';
-/* PONGTRESS — 프로토타입 0.1
- * 로그라이크 + 핀볼. 위쪽 발사대에서 오브를 쏘아 펙(peg)에 튕기고,
- * 펙을 맞힐 때마다 적에게 피해를 준다. 몇 발마다 적이 반격한다.
- * 지금은 한 파일에 전부 담은 수직 슬라이스다. 이후 physics/content 로 분리 예정.
+/* PONGTRESS 프로토타입 0.2 — 전투 코어 슬라이스
+ * content.js(CFG·ROSTER·ENEMIES·BOSS_GOLEM·COMBATS·REWARDS·expToNext) 이후 로드.
+ * 한 턴 = 장전 phase(플런저로 볼을 쏘아 배수 페그로 불리고 9칸 골 포켓에 떨어뜨려 캐릭터 탄환 충전)
+ *        → 전투 phase(충전된 캐릭터가 맨 앞 적 자동 공격, EXP·레벨업·보상, 적 전진).
  */
 (function () {
   const $ = (id) => document.getElementById(id);
-  const boot = (msg) => { const b = $('boot-error'); b.hidden = false; b.textContent = 'ERROR: ' + msg; };
-  window.addEventListener('error', (e) => boot(e.message));
+  const boot = (m) => { const b = $('boot-error'); if (b) { b.hidden = false; b.textContent = 'ERROR: ' + m; } };
+  window.addEventListener('error', (e) => boot(e.message + ' @' + (e.lineno || '?')));
 
-  // ---------- 튜닝 값 ----------
-  const CFG = {
-    gravity: 1400,        // px/s^2
-    restitution: 0.72,    // 반발 계수
-    wallRestitution: 0.7,
-    launchSpeed: 620,     // 발사 속도 px/s
-    ballRadius: 9,
-    pegRadius: 11,
-    pegDamage: 6,         // 펙 하나 맞힐 때 피해
-    maxSubsteps: 8,
-    enemyEveryShots: 3,   // 몇 발마다 적이 반격
-    enemyAttack: 12,      // 반격 피해
-    playerHpMax: 60
-  };
-
-  // ---------- 상태 ----------
-  const state = {
-    screen: 'title',
-    floor: 1,
-    playerHp: CFG.playerHpMax,
-    enemy: null,
-    pegs: [],
-    ball: null,
-    aiming: false,
-    aim: { x: 0, y: 0 },
-    launcher: { x: 0, y: 48 },
-    shots: 0,
-    shotDamage: 0,     // 이번 발사로 누적된 피해
-    settleTimer: 0
-  };
-
-  const canvas = $('stage');
-  const ctx = canvas.getContext('2d');
+  const canvas = $('stage'); const ctx = canvas.getContext('2d');
   let W = 0, H = 0, dpr = 1;
 
+  // ── 전역 상태 ──
+  let S = null;          // 런/전투 상태
+  let anim = { floats: [], flashes: [] };
+  let charging = false, chargeStart = 0;
+  let lastTs = 0;
+
+  // ============ 화면 전환 ============
+  function show(name) {
+    for (const s of ['title', 'lobby', 'combat']) $(s).hidden = (s !== name);
+  }
+
+  // ============ 레이아웃(phase별 영역 비율) ============
+  function layout() {
+    const load = !S || S.phase === 'load';
+    const f = load ? { field: .16, wall: .11, pins: .49, goal: .24 }
+                   : { field: .50, wall: .13, pins: .23, goal: .14 };
+    let y = 0; const r = {};
+    r.field = { x: 0, y, w: W, h: H * f.field }; y += r.field.h;
+    r.wall = { x: 0, y, w: W, h: H * f.wall }; y += r.wall.h;
+    r.pins = { x: 0, y, w: W, h: H * f.pins }; y += r.pins.h;
+    r.goal = { x: 0, y, w: W, h: H * f.goal };
+    return r;
+  }
+
   function resize() {
-    const wrap = $('stage-wrap');
-    const rect = wrap.getBoundingClientRect();
+    const rect = $('stage-wrap').getBoundingClientRect();
     dpr = Math.min(window.devicePixelRatio || 1, 2);
     W = Math.max(240, Math.floor(rect.width));
-    H = Math.max(320, Math.floor(rect.height));
-    canvas.width = Math.floor(W * dpr);
-    canvas.height = Math.floor(H * dpr);
-    canvas.style.width = W + 'px';
-    canvas.style.height = H + 'px';
+    H = Math.max(360, Math.floor(rect.height));
+    canvas.width = Math.floor(W * dpr); canvas.height = Math.floor(H * dpr);
+    canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    state.launcher.x = W / 2;
   }
 
-  // ---------- 층 구성 ----------
-  const ENEMY_NAMES = ['허수아비', '슬라임', '박쥐 무리', '골렘', '망령', '수문장'];
-
-  function makeFloor(n) {
-    const name = ENEMY_NAMES[Math.min(n - 1, ENEMY_NAMES.length - 1)];
-    const hpMax = 40 + (n - 1) * 26;
-    state.enemy = { name, hp: hpMax, hpMax, attackIn: CFG.enemyEveryShots };
-    state.shots = 0;
-    state.shotDamage = 0;
-    layoutPegs(n);
-    state.ball = null;
-    state.aiming = false;
-    $('hud-floor').textContent = String(n);
-    $('hud-enemy-name').textContent = name;
-    syncHud();
-  }
-
-  function layoutPegs(n) {
-    state.pegs = [];
-    const cols = 7, rows = 6 + Math.min(n, 4);
-    const top = 130, bottom = H - 150;
-    const gapY = (bottom - top) / (rows - 1);
-    const marginX = 34;
-    const spanX = W - marginX * 2;
-    for (let r = 0; r < rows; r++) {
-      const offset = (r % 2) ? spanX / (cols * 2) : 0;
-      for (let c = 0; c < cols; c++) {
-        // 살짝 흩뿌려 규칙성을 깬다
-        if (Math.random() < 0.14) continue;
-        const x = marginX + offset + (spanX / cols) * c + (Math.random() - 0.5) * 8;
-        const y = top + gapY * r + (Math.random() - 0.5) * 6;
-        if (x < marginX || x > W - marginX) continue;
-        state.pegs.push({ x, y, r: CFG.pegRadius, alive: true, flash: 0 });
-      }
-    }
-  }
-
-  // ---------- 발사 / 물리 ----------
-  function fire() {
-    if (state.ball || state.screen !== 'play') return;
-    const dx = state.aim.x - state.launcher.x;
-    let dy = state.aim.y - state.launcher.y;
-    if (dy < 20) dy = 20; // 항상 아래쪽으로
-    const len = Math.hypot(dx, dy) || 1;
-    state.ball = {
-      x: state.launcher.x, y: state.launcher.y + 6,
-      vx: (dx / len) * CFG.launchSpeed,
-      vy: (dy / len) * CFG.launchSpeed,
-      r: CFG.ballRadius
+  // ============ 런 시작 ============
+  function startRun() {
+    const party = ROSTER.map(c => c.id);            // 프로토타입: 기본 3인
+    const wallMax = party.reduce((s, id) => s + roster(id).hp, 0);
+    S = {
+      combatIndex: 0, level: 1, exp: 0, expNext: expToNext(1),
+      atkBonus: 0, bonusBalls: 0, party,
+      wallHpMax: wallMax, wallHp: wallMax,
+      // 아래는 전투마다 초기화
+      phase: 'load', chars: [], pegs: [], pockets: [], balls: [],
+      enemies: [], waves: [], waveIdx: 0, launchesLeft: 0, passiveBalls: 0,
+      shotQueue: [], battleTimer: 0, pendingRewards: 0, autoSkill: false,
+      combat: null, over: false
     };
-    state.shots++;
-    state.shotDamage = 0;
-    for (const p of state.pegs) p.alive = true; // 매 발사마다 펙 새로고침
-    $('hud-shots').textContent = String(state.shots);
-  }
-
-  function stepBall(dt) {
-    const b = state.ball;
-    if (!b) return;
-    // 빠른 이동 시 관통 방지: 이동 거리를 나눠 처리
-    const speed = Math.hypot(b.vx, b.vy);
-    const steps = Math.min(CFG.maxSubsteps, 1 + Math.floor(speed * dt / (CFG.pegRadius)));
-    const h = dt / steps;
-    for (let s = 0; s < steps; s++) {
-      b.vy += CFG.gravity * h;
-      b.x += b.vx * h;
-      b.y += b.vy * h;
-      // 벽
-      if (b.x < b.r) { b.x = b.r; b.vx = Math.abs(b.vx) * CFG.wallRestitution; }
-      if (b.x > W - b.r) { b.x = W - b.r; b.vx = -Math.abs(b.vx) * CFG.wallRestitution; }
-      if (b.y < b.r) { b.y = b.r; b.vy = Math.abs(b.vy) * CFG.wallRestitution; }
-      // 펙 충돌
-      for (const p of state.pegs) {
-        if (!p.alive) continue;
-        const dx = b.x - p.x, dy = b.y - p.y;
-        const dist = Math.hypot(dx, dy);
-        const min = b.r + p.r;
-        if (dist < min) {
-          const nx = dist ? dx / dist : 0, ny = dist ? dy / dist : -1;
-          const overlap = min - dist;
-          b.x += nx * overlap; b.y += ny * overlap;
-          const vDotN = b.vx * nx + b.vy * ny;
-          b.vx -= (1 + CFG.restitution) * vDotN * nx;
-          b.vy -= (1 + CFG.restitution) * vDotN * ny;
-          p.alive = false; p.flash = 1;
-          hitPeg(p);
-        }
-      }
-    }
-    // 바닥으로 빠지면 발사 종료
-    if (b.y - b.r > H) endShot();
-  }
-
-  function hitPeg(p) {
-    state.shotDamage += CFG.pegDamage;
-    state.enemy.hp = Math.max(0, state.enemy.hp - CFG.pegDamage);
-    $('hud-damage').textContent = String(state.shotDamage);
-    syncHud();
-  }
-
-  function endShot() {
-    state.ball = null;
-    if (state.enemy.hp <= 0) { win(); return; }
-    // 적 반격 카운트
-    state.enemy.attackIn--;
-    if (state.enemy.attackIn <= 0) {
-      state.enemy.attackIn = CFG.enemyEveryShots;
-      state.playerHp = Math.max(0, state.playerHp - CFG.enemyAttack);
-      toast(state.enemy.name + '의 반격! -' + CFG.enemyAttack);
-      syncHud();
-      if (state.playerHp <= 0) { lose(); return; }
-    }
-  }
-
-  // ---------- 결과 ----------
-  function win() {
-    state.ball = null;
-    show('result');
-    $('result-title').textContent = state.floor + '층 돌파';
-    $('result-body').textContent = state.enemy.name + '을(를) 쓰러뜨렸다. 다음 층으로.';
-    $('btn-next').textContent = '다음 층';
-    state.pendingNext = () => { state.floor++; startFloor(); };
-  }
-  function lose() {
-    state.ball = null;
-    show('result');
-    $('result-title').textContent = '쓰러졌다';
-    $('result-body').textContent = state.floor + '층에서 끝났다. 처음부터 다시.';
-    $('btn-next').textContent = '다시 시작';
-    state.pendingNext = () => { state.floor = 1; state.playerHp = CFG.playerHpMax; startFloor(); };
-  }
-
-  // ---------- HUD ----------
-  function syncHud() {
-    const e = state.enemy;
-    if (e) {
-      $('hud-enemy-hp').style.width = (100 * e.hp / e.hpMax) + '%';
-    }
-    $('hud-player-hp').style.width = (100 * state.playerHp / CFG.playerHpMax) + '%';
-  }
-  let toastTimer = 0;
-  function toast(msg) {
-    const t = $('toast'); t.textContent = msg; t.classList.add('show');
-    clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 1400);
-  }
-
-  // ---------- 렌더 ----------
-  function draw() {
-    ctx.clearRect(0, 0, W, H);
-    // 발사대
-    const L = state.launcher;
-    ctx.save();
-    ctx.fillStyle = '#ffcf5c';
-    ctx.beginPath(); ctx.arc(L.x, L.y, 12, 0, Math.PI * 2); ctx.fill();
-    ctx.restore();
-    // 조준선
-    if (state.aiming && !state.ball) {
-      let dx = state.aim.x - L.x, dy = state.aim.y - L.y;
-      if (dy < 20) dy = 20;
-      const len = Math.hypot(dx, dy) || 1;
-      const ux = dx / len, uy = dy / len;
-      ctx.save();
-      ctx.strokeStyle = '#ffffff55'; ctx.lineWidth = 2; ctx.setLineDash([4, 8]);
-      ctx.beginPath(); ctx.moveTo(L.x, L.y);
-      ctx.lineTo(L.x + ux * 160, L.y + uy * 160); ctx.stroke();
-      ctx.restore();
-    }
-    // 펙
-    for (const p of state.pegs) {
-      ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
-      if (p.alive) {
-        ctx.fillStyle = '#8f86d6';
-        ctx.fill();
-        ctx.lineWidth = 2; ctx.strokeStyle = '#c9c2ff';
-        ctx.stroke();
-      } else {
-        ctx.fillStyle = p.flash > 0 ? '#ffcf5c' : '#3a3560';
-        ctx.fill();
-      }
-      if (p.flash > 0) p.flash = Math.max(0, p.flash - 0.08);
-    }
-    // 오브
-    const b = state.ball;
-    if (b) {
-      ctx.save();
-      ctx.shadowColor = '#46e6d0'; ctx.shadowBlur = 14;
-      ctx.fillStyle = '#46e6d0';
-      ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2); ctx.fill();
-      ctx.restore();
-    }
-  }
-
-  // ---------- 루프 ----------
-  let last = 0;
-  function loop(ts) {
-    const dt = Math.min(0.032, last ? (ts - last) / 1000 : 0.016);
-    last = ts;
-    if (state.screen === 'play') { stepBall(dt); draw(); }
+    show('combat'); resize();
+    startCombat(0);
     requestAnimationFrame(loop);
   }
 
-  // ---------- 입력 ----------
-  function canvasPoint(ev) {
-    const rect = canvas.getBoundingClientRect();
-    const t = ev.touches ? ev.touches[0] : ev;
-    return { x: t.clientX - rect.left, y: t.clientY - rect.top };
-  }
-  canvas.addEventListener('pointerdown', (ev) => {
-    if (state.ball) return;
-    state.aiming = true; state.aim = canvasPoint(ev);
-  });
-  canvas.addEventListener('pointermove', (ev) => {
-    if (state.aiming) state.aim = canvasPoint(ev);
-  });
-  canvas.addEventListener('pointerup', () => {
-    if (state.aiming) { state.aiming = false; fire(); }
-  });
-  canvas.addEventListener('pointercancel', () => { state.aiming = false; });
+  const roster = (id) => ROSTER.find(c => c.id === id);
 
-  // ---------- 화면 전환 ----------
-  function show(name) {
-    state.screen = name;
-    for (const s of ['title', 'play', 'result']) $(s).hidden = (s !== name);
-  }
-  function startFloor() {
-    show('play');
-    resize();
-    makeFloor(state.floor);
+  // ============ 전투 시작 ============
+  function startCombat(idx) {
+    S.combatIndex = idx;
+    const combat = COMBATS[idx];
+    S.combat = combat; S.over = false;
+    // 캐릭터(레인 배치) — 프로토타입: party 순서대로 레인 0,1,2
+    S.chars = S.party.map((id, lane) => ({ ref: roster(id), lane, ammo: 0, gauge: 0, armed: false }));
+    S.passiveBalls = 0;
+    S.balls = []; S.shotQueue = []; anim.floats = []; anim.flashes = [];
+    buildBoard();
+    // 패시브(보드 효과) 적용
+    for (const c of S.chars) applyPassive(c.ref.passive);
+    // 적/웨이브
+    S.enemies = [];
+    if (combat.boss) { spawnBoss(); S.waves = []; }
+    else { S.waves = combat.waves.slice(); spawnWave(); }
+    S.waveIdx = 0;
+    $('c-name').textContent = combat.name;
+    enterLoad();
+    syncHud();
   }
 
-  $('btn-start').addEventListener('click', () => { state.floor = 1; state.playerHp = CFG.playerHpMax; startFloor(); });
-  $('btn-next').addEventListener('click', () => { if (state.pendingNext) state.pendingNext(); });
-  window.addEventListener('resize', () => { if (state.screen === 'play') resize(); });
+  // ============ 보드(페그·포켓) 생성 ============
+  function buildBoard() {
+    S.pegs = [];
+    // 페그: 격자 + 지터, 일부 배수 페그
+    const cols = 6, rows = 5;
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const off = (r % 2) ? 0.5 / cols : 0;
+        const fx = (c + 0.5) / cols + off + (Math.random() - 0.5) * 0.04;
+        const fy = 0.14 + r * (0.7 / (rows - 1)) + (Math.random() - 0.5) * 0.03;
+        if (fx < 0.05 || fx > 0.95) continue;
+        let type = 'normal';
+        const rnd = Math.random();
+        if (rnd < 0.08) type = 'mult5'; else if (rnd < 0.28) type = 'mult2';
+        S.pegs.push({ fx, fy, type, alive: true });
+      }
+    }
+    // 포켓 9칸: 레인별 3칸, 캐릭터 gol 만큼 충전
+    S.pockets = [];
+    for (let i = 0; i < 9; i++) {
+      const lane = Math.floor(i / 3), sub = i % 3;
+      const c = S.chars.find(ch => ch.lane === lane);
+      const type = (c && sub < c.ref.gol) ? 'charge' : 'blank';
+      S.pockets.push({ lane, type });
+    }
+  }
 
-  // 시작
-  resize();
-  requestAnimationFrame(loop);
-  window.__PONGTRESS__ = { state, CFG }; // 디버그/스모크용
+  function applyPassive(p) {
+    if (!p) return;
+    if (p.kind === 'addBall') S.passiveBalls += p.n;
+    else if (p.kind === 'addPeg') addPegToBoard(S, p.peg, p.n);
+    else if (p.kind === 'closeBlank') { for (let i = 0; i < p.n; i++) openOneBlank(S); }
+  }
+
+  // ============ 장전 phase ============
+  function enterLoad() {
+    S.phase = 'load';
+    for (const c of S.chars) { c.ammo = 0; c.armed = false; }
+    for (const p of S.pegs) p.alive = true;        // 특수 페그 턴마다 초기화
+    S.launchesLeft = CFG.launchesPerTurn + S.bonusBalls + S.passiveBalls;
+    S.balls = [];
+    $('c-phase').textContent = '장전';
+    $('btn-fire').hidden = false; $('btn-auto').hidden = false;
+    renderSkills();
+  }
+
+  function launchBall() {
+    if (S.phase !== 'load' || S.launchesLeft <= 0 || S.over) return;
+    const r = layout().pins;
+    const power = currentPower();
+    // 플런저: 우측 하단에서 위로(살짝 왼쪽) 발사
+    S.balls.push({
+      x: r.x + r.w - CFG.ballRadius - 2, y: r.y + r.h - CFG.ballRadius - 2,
+      vx: -power * 0.28, vy: -power, r: CFG.ballRadius
+    });
+    S.launchesLeft--;
+  }
+
+  function currentPower() {
+    if (!charging) return CFG.powerMin;
+    const t = Math.min(1, (performance.now() - chargeStart) / CFG.powerChargeTime);
+    return CFG.powerMin + (CFG.powerMax - CFG.powerMin) * t;
+  }
+
+  function stepBalls(dt) {
+    const r = layout().pins; const goalY = r.y + r.h;
+    const pegR = CFG.pegRadius;
+    for (let i = S.balls.length - 1; i >= 0; i--) {
+      const b = S.balls[i];
+      b.age = (b.age || 0) + dt;
+      if (b.age > 3.5) { landBall(b); S.balls.splice(i, 1); continue; }   // 끼임 방지: 오래 살면 강제 낙하
+      const speed = Math.hypot(b.vx, b.vy);
+      const sub = Math.min(6, 1 + Math.floor(speed * dt / pegR));
+      const h = dt / sub;
+      let landed = false;
+      for (let s = 0; s < sub && !landed; s++) {
+        b.vy += CFG.gravity * h;
+        b.x += b.vx * h; b.y += b.vy * h;
+        // 좌우 벽
+        if (b.x < r.x + b.r) { b.x = r.x + b.r; b.vx = Math.abs(b.vx) * CFG.wallRestitution; }
+        if (b.x > r.x + r.w - b.r) { b.x = r.x + r.w - b.r; b.vx = -Math.abs(b.vx) * CFG.wallRestitution; }
+        // 위 벽(핀 영역 상단)
+        if (b.y < r.y + b.r) { b.y = r.y + b.r; b.vy = Math.abs(b.vy) * CFG.wallRestitution; }
+        // 페그 충돌
+        for (const p of S.pegs) {
+          if (!p.alive) continue;
+          const px = r.x + p.fx * r.w, py = r.y + p.fy * r.h;
+          const dx = b.x - px, dy = b.y - py, dist = Math.hypot(dx, dy), min = b.r + pegR;
+          if (dist < min) {
+            const nx = dist ? dx / dist : 0, ny = dist ? dy / dist : -1;
+            b.x += nx * (min - dist); b.y += ny * (min - dist);
+            const vdot = b.vx * nx + b.vy * ny;
+            b.vx -= (1 + CFG.restitution) * vdot * nx;
+            b.vy -= (1 + CFG.restitution) * vdot * ny;
+            b.vx += (Math.random() - 0.5) * 70;   // 수평 지터: 페그 위 수직 안착 방지
+            anim.flashes.push({ x: px, y: py, t: 1 });
+            if (p.type === 'mult2') { splitBall(b, 1); p.alive = false; }
+            else if (p.type === 'mult5') { splitBall(b, 4); p.alive = false; }
+          }
+        }
+        // 골 포켓 진입
+        if (b.y >= goalY) { landBall(b); S.balls.splice(i, 1); landed = true; }
+      }
+    }
+    // 다 소모되면 전투로
+    if (S.phase === 'load' && S.launchesLeft <= 0 && S.balls.length === 0) enterBattle();
+  }
+
+  function splitBall(b, n) {
+    for (let k = 0; k < n && S.balls.length < CFG.maxBalls; k++) {
+      const ang = (Math.random() - 0.5) * 1.2;
+      const sp = Math.hypot(b.vx, b.vy) * (0.8 + Math.random() * 0.3);
+      S.balls.push({ x: b.x, y: b.y, vx: Math.sin(ang) * sp * 0.6 - 40, vy: -Math.abs(Math.cos(ang) * sp) * 0.6, r: b.r });
+    }
+  }
+
+  function landBall(b) {
+    const g = layout().goal;
+    let idx = Math.floor(((b.x - g.x) / g.w) * 9);
+    idx = Math.max(0, Math.min(8, idx));
+    const pk = S.pockets[idx];
+    if (pk && pk.type === 'charge') {
+      const c = S.chars.find(ch => ch.lane === pk.lane);
+      if (c) { c.ammo++; c.gauge++; renderSkills(); }
+      anim.floats.push({ x: g.x + (idx + 0.5) * (g.w / 9), y: g.y + 10, text: '+1', color: laneHex(pk.lane), t: 1 });
+    }
+  }
+
+  // ============ 전투 phase ============
+  function enterBattle() {
+    S.phase = 'battle';
+    $('c-phase').textContent = '전투';
+    $('btn-fire').hidden = true;
+    // 액티브 스킬 발동(자동 또는 armed) 결정 → 샷 큐 구성
+    S.shotQueue = [];
+    for (const c of S.chars) {
+      const sk = c.ref.active;
+      const eligible = c.gauge >= sk.gauge;
+      const use = eligible && (S.autoSkill || c.armed);
+      if (use) { applyActive(c, sk); c.gauge = 0; }
+      c.armed = false;
+      // 일반 공격: 탄환 수만큼
+      for (let k = 0; k < c.ammo; k++) S.shotQueue.push({ lane: c.lane, dmg: c.ref.atk + S.atkBonus });
+    }
+    // 스킬로 추가된 샷은 applyActive에서 unshift됨
+    S.battleTimer = 0;
+    renderSkills();
+  }
+
+  function applyActive(c, sk) {
+    if (sk.kind === 'bigHit') S.shotQueue.push({ lane: c.lane, dmg: (c.ref.atk + S.atkBonus) * sk.mult, big: true });
+    else if (sk.kind === 'extraShots') { for (let k = 0; k < sk.shots; k++) S.shotQueue.push({ lane: c.lane, dmg: c.ref.atk + S.atkBonus }); }
+    else if (sk.kind === 'heal') { S.wallHp = Math.min(S.wallHpMax, S.wallHp + sk.amount); anim.floats.push({ x: W / 2, y: layout().wall.y + 12, text: '+' + sk.amount, color: '#6cf', t: 1.2 }); }
+  }
+
+  function frontmostEnemy() {
+    let best = null;
+    for (const e of S.enemies) { if (!best || e.row < best.row || (e.row === best.row && e.lane < best.lane)) best = e; }
+    return best;
+  }
+
+  function stepBattle(dt) {
+    S.battleTimer += dt * 1000;
+    if (S.battleTimer < CFG.battleShotDelay) return;
+    S.battleTimer = 0;
+    if (S.shotQueue.length === 0) { endBattle(); return; }
+    const shot = S.shotQueue.shift();
+    const e = frontmostEnemy();
+    if (!e) { S.shotQueue = []; endBattle(); return; }
+    let dmg = shot.dmg;
+    if (e.isBoss && e.stun > 0) dmg = Math.round(dmg * (1 + BOSS_GOLEM.vulnerable));
+    e.hp -= dmg;
+    const pos = enemyPos(e);
+    anim.floats.push({ x: pos.x, y: pos.y, text: String(dmg), color: shot.big ? '#ffcf5c' : '#fff', t: .9, big: shot.big });
+    anim.flashes.push({ x: pos.x, y: pos.y, t: 1, big: true });
+    if (e.hp <= 0) killEnemy(e);
+  }
+
+  function killEnemy(e) {
+    const idx = S.enemies.indexOf(e); if (idx >= 0) S.enemies.splice(idx, 1);
+    gainExp(e.exp);
+    if (e.isBoss) { winRun(); }
+  }
+
+  function gainExp(x) {
+    S.exp += x;
+    while (S.exp >= S.expNext) { S.exp -= S.expNext; S.level++; S.expNext = expToNext(S.level); S.pendingRewards++; }
+    syncHud();
+  }
+
+  function endBattle() {
+    if (S.over) return;
+    if (S.pendingRewards > 0) { showReward(); return; }   // 보상 먼저 다 받고
+    advanceEnemies();
+  }
+
+  // ============ 적 전진·스폰 ============
+  function advanceEnemies() {
+    S._turns = (S._turns || 0) + 1;
+    // 보스 스턴이면 이번 턴 전진 스킵
+    for (const e of S.enemies.slice()) {
+      if (e.isBoss && e.stun > 0) { e.stun--; continue; }
+      e.row -= 1;
+      if (e.row < 0) {
+        S.wallHp -= e.dmg;
+        anim.floats.push({ x: W / 2, y: layout().wall.y + 20, text: '-' + e.dmg, color: '#ff6b6b', t: 1.2, big: true });
+        if (e.isBoss) { e.row = boss_retreatRow(); }   // 보스는 큰 피해 후 뒤로
+        else { const i = S.enemies.indexOf(e); if (i >= 0) S.enemies.splice(i, 1); }
+      }
+    }
+    if (S.wallHp <= 0) { S.wallHp = 0; loseRun(); return; }
+    // 스폰
+    if (!S.combat.boss) {
+      if (S.enemies.length === 0 && S.waves.length === 0) { winCombat(); return; }
+      if (S.waves.length > 0) spawnWave();
+    }
+    syncHud();
+    enterLoad();
+  }
+
+  function boss_retreatRow() { return Math.min(CFG.fieldRows - 1, Math.round(CFG.fieldRows / 2)); }
+
+  function spawnWave() {
+    const w = S.waves.shift(); if (!w) return;
+    w.forEach((type, k) => {
+      const def = ENEMIES[type];
+      const lane = k % CFG.lanes;
+      const row = CFG.fieldRows - 1 - Math.floor(k / CFG.lanes);
+      S.enemies.push({ type, name: def.name, lane, row, hp: def.hp, maxHp: def.hp, dmg: def.dmg, exp: def.exp, color: def.color, stun: 0 });
+    });
+  }
+
+  function spawnBoss() {
+    const b = BOSS_GOLEM;
+    S.enemies.push({ isBoss: true, name: b.name, lane: 1, row: CFG.fieldRows - 1, hp: b.hp, maxHp: b.hp, dmg: b.dmg, exp: b.exp, color: b.color, stun: 0, thHit: 0 });
+  }
+
+  // 보스 임계 체크(전투 phase 데미지 적용 후 호출용) — 매 프레임 검사
+  function checkBossThreshold() {
+    const e = S.enemies.find(x => x.isBoss); if (!e) return;
+    const frac = e.hp / e.maxHp;
+    while (e.thHit < BOSS_GOLEM.thresholds.length && frac <= BOSS_GOLEM.thresholds[e.thHit]) {
+      e.thHit++;
+      e.row = Math.min(CFG.fieldRows - 1, e.row + BOSS_GOLEM.retreat);
+      e.stun = BOSS_GOLEM.stunTurns;
+      anim.floats.push({ x: enemyPos(e).x, y: enemyPos(e).y - 20, text: '휘청!', color: '#ffcf5c', t: 1.2 });
+    }
+  }
+
+  // ============ 보상 ============
+  function showReward() {
+    const box = $('reward-choices'); box.replaceChildren();
+    const pool = REWARDS.slice(); const pick = [];
+    for (let i = 0; i < 3 && pool.length; i++) pick.push(pool.splice(Math.floor(Math.random() * pool.length), 1)[0]);
+    $('reward-sub').textContent = '남은 보상 ' + S.pendingRewards + '개 · 하나를 고르세요';
+    pick.forEach(rw => {
+      const b = document.createElement('button'); b.className = 'reward-card';
+      b.innerHTML = '<div class="rc-name">' + rw.name + '</div><div class="rc-desc">' + rw.desc + '</div>';
+      b.onclick = () => {
+        rw.apply(S); S.pendingRewards--; $('reward').hidden = true; syncHud();
+        if (S.pendingRewards > 0) showReward(); else advanceEnemies();
+      };
+      box.append(b);
+    });
+    $('reward').hidden = false;
+  }
+
+  // ============ 승패 ============
+  function winCombat() {
+    if (S.combatIndex + 1 < COMBATS.length) { startCombat(S.combatIndex + 1); }
+    else winRun();
+  }
+  function winRun() { S.over = true; endResult('승리', '모든 전투와 보스를 돌파했습니다. 레벨 ' + S.level + ' 도달.'); }
+  function loseRun() { S.over = true; endResult('패배', S.combat.name + '에서 성벽이 무너졌습니다.'); }
+  function endResult(title, body) {
+    $('result-title').textContent = title; $('result-body').textContent = body; $('result').hidden = false;
+  }
+
+  // ============ 렌더 ============
+  function laneColor(l) { return ['var(--lane0)', 'var(--lane1)', 'var(--lane2)'][l] || '#fff'; }
+  function laneHex(l) { return ['#46e6d0', '#ffcf5c', '#ff5db1'][l] || '#fff'; }
+
+  function enemyPos(e) {
+    const r = layout().field;
+    const laneW = r.w / CFG.lanes;
+    const x = r.x + (e.lane + 0.5) * laneW;
+    const y = r.y + (CFG.fieldRows - 1 - e.row + 0.5) * (r.h / CFG.fieldRows);
+    return { x, y };
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+    const r = layout();
+    // 필드 배경
+    ctx.fillStyle = '#ffffff08'; ctx.fillRect(r.field.x, r.field.y, r.field.w, r.field.h);
+    // 레인 구분선
+    ctx.strokeStyle = '#ffffff12'; ctx.lineWidth = 1;
+    for (let l = 1; l < CFG.lanes; l++) { const x = r.field.w / CFG.lanes * l; ctx.beginPath(); ctx.moveTo(x, r.field.y); ctx.lineTo(x, r.wall.y + r.wall.h); ctx.stroke(); }
+    // 적
+    for (const e of S.enemies) {
+      const p = enemyPos(e); const rad = e.isBoss ? 26 : 15;
+      ctx.beginPath(); ctx.arc(p.x, p.y, rad, 0, 7); ctx.fillStyle = e.stun > 0 ? '#c9c2ff' : e.color; ctx.fill();
+      if (e.isBoss) { ctx.lineWidth = 3; ctx.strokeStyle = '#fff6'; ctx.stroke(); }
+      // hp bar
+      const bw = rad * 2, bx = p.x - rad, by = p.y + rad + 3;
+      ctx.fillStyle = '#0008'; ctx.fillRect(bx, by, bw, 4);
+      ctx.fillStyle = '#ff6b6b'; ctx.fillRect(bx, by, bw * Math.max(0, e.hp / e.maxHp), 4);
+    }
+    // 성벽
+    ctx.fillStyle = '#ffffff10'; ctx.fillRect(r.wall.x, r.wall.y, r.wall.w, r.wall.h);
+    const laneW = r.wall.w / CFG.lanes;
+    for (const c of S.chars) {
+      const x = r.wall.x + (c.lane + 0.5) * laneW, y = r.wall.y + r.wall.h / 2;
+      ctx.fillStyle = laneHex(c.lane); ctx.beginPath(); ctx.arc(x, y - 4, 10, 0, 7); ctx.fill();
+      ctx.fillStyle = '#fff'; ctx.font = '11px system-ui'; ctx.textAlign = 'center';
+      ctx.fillText(c.ref.name, x, y + 16);
+      if (S.phase === 'load' && c.ammo > 0) { ctx.fillStyle = '#ffcf5c'; ctx.font = 'bold 12px system-ui'; ctx.fillText('◆' + c.ammo, x, y - 20); }
+    }
+    // 성벽 HP 바
+    ctx.fillStyle = '#0006'; ctx.fillRect(r.wall.x + 6, r.wall.y + r.wall.h - 8, r.wall.w - 12, 5);
+    ctx.fillStyle = '#46e6d0'; ctx.fillRect(r.wall.x + 6, r.wall.y + r.wall.h - 8, (r.wall.w - 12) * Math.max(0, S.wallHp / S.wallHpMax), 5);
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 11px system-ui'; ctx.textAlign = 'left';
+    ctx.fillText('성벽 ' + Math.ceil(S.wallHp) + '/' + S.wallHpMax, r.wall.x + 8, r.wall.y + 12);
+
+    // 핀볼 필드
+    ctx.fillStyle = '#00000022'; ctx.fillRect(r.pins.x, r.pins.y, r.pins.w, r.pins.h);
+    for (const p of S.pegs) {
+      const px = r.pins.x + p.fx * r.pins.w, py = r.pins.y + p.fy * r.pins.h;
+      ctx.beginPath(); ctx.arc(px, py, CFG.pegRadius, 0, 7);
+      if (!p.alive) { ctx.fillStyle = '#2a2648'; ctx.fill(); continue; }
+      ctx.fillStyle = p.type === 'mult5' ? '#ff5db1' : p.type === 'mult2' ? '#ffcf5c' : '#8f86d6';
+      ctx.fill();
+      if (p.type !== 'normal') { ctx.fillStyle = '#1a1430'; ctx.font = 'bold 9px system-ui'; ctx.textAlign = 'center'; ctx.fillText(p.type === 'mult5' ? '×5' : '×2', px, py + 3); }
+    }
+    // 볼
+    for (const b of S.balls) { ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, 7); ctx.fillStyle = '#eafcff'; ctx.fill(); }
+    // 플런저 파워 표시(장전 phase, 홀드 중)
+    if (S.phase === 'load' && charging) {
+      const t = (currentPower() - CFG.powerMin) / (CFG.powerMax - CFG.powerMin);
+      ctx.fillStyle = '#0008'; ctx.fillRect(r.pins.x + r.pins.w - 12, r.pins.y + 6, 6, r.pins.h - 12);
+      ctx.fillStyle = '#ffcf5c'; const hh = (r.pins.h - 12) * t; ctx.fillRect(r.pins.x + r.pins.w - 12, r.pins.y + 6 + (r.pins.h - 12 - hh), 6, hh);
+    }
+
+    // 골 포켓
+    const g = r.goal, pw = g.w / 9;
+    for (let i = 0; i < 9; i++) {
+      const pk = S.pockets[i]; const x = g.x + i * pw;
+      ctx.fillStyle = pk.type === 'charge' ? laneHex(pk.lane) + '55' : '#ffffff08';
+      ctx.fillRect(x + 1, g.y + 2, pw - 2, g.h - 4);
+      ctx.strokeStyle = '#ffffff18'; ctx.strokeRect(x + 1, g.y + 2, pw - 2, g.h - 4);
+      ctx.fillStyle = pk.type === 'charge' ? laneHex(pk.lane) : '#4a4570';
+      ctx.font = 'bold 12px system-ui'; ctx.textAlign = 'center';
+      ctx.fillText(pk.type === 'charge' ? '◆' : '×', x + pw / 2, g.y + g.h / 2 + 4);
+    }
+
+    // 플로팅 텍스트
+    for (const f of anim.floats) {
+      ctx.globalAlpha = Math.max(0, f.t); ctx.fillStyle = f.color; ctx.textAlign = 'center';
+      ctx.font = 'bold ' + (f.big ? 18 : 13) + 'px system-ui';
+      ctx.fillText(f.text, f.x, f.y - (1 - f.t) * 24); ctx.globalAlpha = 1;
+    }
+    for (const fl of anim.flashes) {
+      ctx.globalAlpha = fl.t * 0.5; ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(fl.x, fl.y, (fl.big ? 16 : 10) * (1.4 - fl.t), 0, 7); ctx.stroke(); ctx.globalAlpha = 1;
+    }
+  }
+
+  // ============ 루프 ============
+  function loop(ts) {
+    const d = Math.min(0.032, (ts - lastTs) / 1000 || 0.016); lastTs = ts;
+    if (S && !S.over) {
+      if (S.phase === 'load') stepBalls(d);
+      else if (S.phase === 'battle') { stepBattle(d); checkBossThreshold(); }
+      for (let i = anim.floats.length - 1; i >= 0; i--) { anim.floats[i].t -= d * 1.2; if (anim.floats[i].t <= 0) anim.floats.splice(i, 1); }
+      for (let i = anim.flashes.length - 1; i >= 0; i--) { anim.flashes[i].t -= d * 3; if (anim.flashes[i].t <= 0) anim.flashes.splice(i, 1); }
+      draw();
+    }
+    requestAnimationFrame(loop);
+  }
+
+  // ============ HUD·스킬 UI ============
+  function syncHud() {
+    $('c-level').textContent = 'Lv.' + S.level;
+    $('exp-fill').style.width = (100 * S.exp / S.expNext) + '%';
+  }
+  function renderSkills() {
+    const row = $('skill-row'); row.replaceChildren();
+    for (const c of S.chars) {
+      const sk = c.ref.active; const ready = c.gauge >= sk.gauge;
+      const b = document.createElement('button');
+      b.className = 'skillbtn' + (ready ? ' ready' : '') + (c.armed ? ' armed' : '');
+      b.textContent = c.ref.name + ' ' + sk.name + ' ' + Math.min(c.gauge, sk.gauge) + '/' + sk.gauge;
+      b.onclick = () => { if (c.gauge >= sk.gauge) { c.armed = !c.armed; renderSkills(); } };
+      row.append(b);
+    }
+  }
+
+  // ============ 입력 ============
+  function fireDown(e) { e.preventDefault(); if (!S || S.phase !== 'load' || S.launchesLeft <= 0) return; charging = true; chargeStart = performance.now(); $('btn-fire').classList.add('charging'); }
+  function fireUp(e) { e.preventDefault(); if (!charging) return; charging = false; $('btn-fire').classList.remove('charging'); launchBall(); }
+
+  // ============ 로비 ============
+  function renderLobby() {
+    const pv = $('party-preview'); pv.replaceChildren();
+    for (const id of ROSTER.map(c => c.id)) {
+      const c = roster(id); const d = document.createElement('div'); d.className = 'party-card';
+      d.innerHTML = '<div class="pc-name">' + c.name + '</div><div class="pc-stat">공격 ' + c.atk + ' · 체력 ' + c.hp + ' · 골칸 ' + c.gol + '</div>';
+      pv.append(d);
+    }
+  }
+
+  // ============ 와이어링 ============
+  $('btn-start').onclick = () => { show('lobby'); renderLobby(); };
+  document.querySelectorAll('.tabbtn').forEach(t => t.onclick = () => {
+    document.querySelectorAll('.tabbtn').forEach(x => x.classList.toggle('active', x === t));
+    $('tab-sortie').hidden = t.dataset.tab !== 'sortie';
+    $('tab-shop').hidden = t.dataset.tab !== 'shop';
+  });
+  $('btn-sortie').onclick = () => startRun();
+  $('btn-result').onclick = () => { $('result').hidden = true; show('lobby'); renderLobby(); };
+  $('btn-auto').onclick = () => { S.autoSkill = !S.autoSkill; $('btn-auto').textContent = '자동 ' + (S.autoSkill ? 'ON' : 'OFF'); $('btn-auto').classList.toggle('on', S.autoSkill); };
+  const fb = $('btn-fire');
+  fb.addEventListener('pointerdown', fireDown); fb.addEventListener('pointerup', fireUp); fb.addEventListener('pointercancel', fireUp);
+  window.addEventListener('resize', () => { if (!$('combat').hidden) resize(); });
+
+  // 디버그/스모크 훅
+  window.__PONGTRESS__ = { get S() { return S; }, startRun, launchBall, enterBattle, CFG };
+
+  // 헤드리스 자가 테스트: ?sim=1 로 런을 자동 진행하며 런타임 오류·상태를 #boot-error 에 남긴다.
+  function runSelfTest() {
+    startRun();
+    if (new URLSearchParams(location.search).has('win')) { S.atkBonus += 60; S.autoSkill = true; }
+    let ticks = 0, launched = 0;
+    const iv = setInterval(() => {
+      ticks++;
+      try {
+        // 헤드리스에선 rAF가 안 도므로 물리를 직접 펌핑(브라우저는 loop가 담당)
+        for (let k = 0; k < 6 && !S.over; k++) {
+          if (S.phase === 'load') stepBalls(0.03);
+          else if (S.phase === 'battle') { stepBattle(0.03); checkBossThreshold(); }
+        }
+        if (!$('result').hidden) { done('result:' + $('result-title').textContent); return; }
+        if (!$('reward').hidden) { const b = document.querySelector('.reward-card'); if (b) b.click(); return; }
+        if (S.phase === 'load' && S.launchesLeft > 0 && S.balls.length === 0) { launchBall(); launched++; return; }
+        if (ticks > 1500) { done('timeout'); }
+      } catch (e) { done('EXC:' + e.message + ' @' + (e.stack ? e.stack.split('\n')[1].trim() : '?')); }
+    }, 8);
+    function done(msg) { clearInterval(iv); const s = S || {}; boot('SIM ' + msg + ' | phase=' + s.phase + ' launchesLeft=' + s.launchesLeft + ' balls=' + (s.balls ? s.balls.length : '?') + ' launched=' + launched + ' lvl=' + s.level + ' wall=' + Math.ceil(s.wallHp || 0) + '/' + s.wallHpMax + ' combat=' + s.combatIndex + ' enemies=' + (s.enemies ? s.enemies.length : '?') + ' turns=' + (s._turns || 0)); }
+  }
+  if (new URLSearchParams(location.search).has('sim')) setTimeout(runSelfTest, 50);
 })();
